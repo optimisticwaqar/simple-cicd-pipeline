@@ -1,0 +1,99 @@
+name: Multi-Stage Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allows manual running
+
+jobs:
+  # STAGE 1: Build the application
+  build:
+    name: 🏗️ Build
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Get Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install Dependencies
+      run: npm install
+      
+    - name: Build Application
+      run: npm run build
+      
+    - name: Save Build Files
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-files
+        path: dist/
+
+  # STAGE 2: Test the application (depends on build)
+  test:
+    name: 🧪 Test
+    runs-on: ubuntu-latest
+    needs: build  # This stage waits for build to complete
+    
+    steps:
+    - name: Get Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install Dependencies
+      run: npm install
+      
+    - name: Run Tests
+      run: npm test
+
+  # STAGE 3: Deploy (depends on both build and test)
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    needs: [build, test]  # This stage waits for both build AND test
+    
+    steps:
+    - name: Download Build Files
+      uses: actions/download-artifact@v4
+      with:
+        name: build-files
+        path: ./deployment/
+        
+    - name: Show Deployment Files
+      run: |
+        echo "Files ready for deployment:"
+        ls -la deployment/
+        
+    - name: Simulate Deployment
+      run: |
+        echo "🚀 Deploying application..."
+        echo "✅ Deployment successful!"
+        echo "App is now live at: https://my-app.example.com"
+
+  # STAGE 4: Notify (always runs, even if other stages fail)
+  notify:
+    name: 📬 Notify
+    runs-on: ubuntu-latest
+    needs: [build, test, deploy]
+    if: always()  # This runs no matter what happens
+    
+    steps:
+    - name: Send Notification
+      run: |
+        echo "📬 Pipeline Status Report"
+        echo "========================"
+        echo "Build: ${{ needs.build.result }}"
+        echo "Test: ${{ needs.test.result }}"
+        echo "Deploy: ${{ needs.deploy.result }}"
+        if [ "${{ needs.deploy.result }}" == "success" ]; then
+          echo "🎉 All stages completed successfully!"
+        else
+          echo "❌ Some stages failed. Check the logs."
+        fi
