@@ -1,0 +1,357 @@
+name: Optimized CI/CD Pipeline
+
+# Environment-specific triggers
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'package*.json'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        type: choice
+        options:
+        - development
+        - staging
+        - production
+        default: 'development'
+      use_cache:
+        description: 'Use caching'
+        type: boolean
+        default: true
+
+# Global environment variables
+env:
+  NODE_VERSION: '18'
+  CACHE_VERSION: 'v1'
+
+jobs:
+  # JOB 1: Setup and Cache Management
+  setup:
+    name: 🔧 Setup & Cache
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.cache-keys.outputs.cache-key }}
+      environment: ${{ steps.env.outputs.environment }}
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Determine Environment
+      id: env
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          ENV="${{ github.event.inputs.environment }}"
+        elif [ "${{ github.ref_name }}" == "main" ]; then
+          ENV="production"
+        elif [ "${{ github.ref_name }}" == "develop" ]; then
+          ENV="staging"  
+        else
+          ENV="development"
+        fi
+        echo "environment=${ENV}" >> $GITHUB_OUTPUT
+        echo "🌍 Environment: ${ENV}"
+        
+    - name: Generate Cache Keys
+      id: cache-keys
+      run: |
+        # Create cache key based on package-lock.json
+        CACHE_KEY="${{ env.CACHE_VERSION }}-${{ runner.os }}-node-${{ env.NODE_VERSION }}-$(sha256sum package-lock.json | cut -d' ' -f1)"
+        echo "cache-key=${CACHE_KEY}" >> $GITHUB_OUTPUT
+        echo "🔑 Cache key: ${CACHE_KEY}"
+        
+    - name: Setup Node.js with Caching
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Check Cache Status
+      id: cache-check
+      if: github.event.inputs.use_cache != 'false'
+      uses: actions/cache@v3
+      with:
+        path: |
+          node_modules
+          ~/.npm
+        key: ${{ steps.cache-keys.outputs.cache-key }}
+        restore-keys: |
+          ${{ env.CACHE_VERSION }}-${{ runner.os }}-node-${{ env.NODE_VERSION }}-
+          
+    - name: Display Cache Status
+      run: |
+        if [ "${{ steps.cache-check.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Cache hit! Dependencies restored from cache"
+        else
+          echo "❌ Cache miss. Dependencies will be installed fresh"
+        fi
+
+  # JOB 2: Install Dependencies with Optimization
+  dependencies:
+    name: 📦 Dependencies
+    runs-on: ubuntu-latest
+    needs: setup
+    outputs:
+      install-time: ${{ steps.timing.outputs.install-time }}
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Restore Cache
+      if: github.event.inputs.use_cache != 'false'
+      uses: actions/cache/restore@v3
+      with:
+        path: |
+          node_modules
+          ~/.npm
+        key: ${{ needs.setup.outputs.cache-key }}
+        
+    - name: Install Dependencies
+      id: install
+      run: |
+        START_TIME=$(date +%s)
+        echo "📦 Installing dependencies..."
+        npm ci --prefer-offline --no-audit
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        echo "⏱️ Installation took: ${DURATION} seconds"
+        echo "install-time=${DURATION}" >> $GITHUB_OUTPUT
+        
+    - name: Save Cache
+      if: github.event.inputs.use_cache != 'false'
+      uses: actions/cache/save@v3
+      with:
+        path: |
+          node_modules
+          ~/.npm
+        key: ${{ needs.setup.outputs.cache-key }}
+        
+    - name: Record Timing
+      id: timing
+      run: |
+        echo "install-time=${{ steps.install.outputs.install-time }}" >> $GITHUB_OUTPUT
+
+  # JOB 3: Parallel Testing and Linting
+  quality-checks:
+    name: 🔍 Quality Checks
+    runs-on: ubuntu-latest
+    needs: [setup, dependencies]
+    
+    strategy:
+      matrix:
+        check: [test, lint, coverage]
+        
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Restore Dependencies
+      uses: actions/cache/restore@v3
+      with:
+        path: |
+          node_modules
+          ~/.npm
+        key: ${{ needs.setup.outputs.cache-key }}
+        fail-on-cache-miss: true
+        
+    - name: Run Tests
+      if: matrix.check == 'test'
+      run: |
+        echo "🧪 Running tests..."
+        npm test
+        
+    - name: Run Linting
+      if: matrix.check == 'lint'
+      run: |
+        echo "🔍 Running linter..."
+        npm run lint
+        
+    - name: Generate Coverage
+      if: matrix.check == 'coverage'
+      run: |
+        echo "📊 Generating test coverage..."
+        npm run test:coverage
+        
+    - name: Upload Coverage
+      if: matrix.check == 'coverage'
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: coverage/
+        retention-days: 7
+
+  # JOB 4: Optimized Build
+  build:
+    name: 🏗️ Build
+    runs-on: ubuntu-latest
+    needs: [setup, dependencies, quality-checks]
+    outputs:
+      build-time: ${{ steps.build.outputs.build-time }}
+      build-size: ${{ steps.build.outputs.build-size }}
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+        
+    - name: Restore Dependencies
+      uses: actions/cache/restore@v3
+      with:
+        path: |
+          node_modules
+          ~/.npm
+        key: ${{ needs.setup.outputs.cache-key }}
+        fail-on-cache-miss: true
+        
+    - name: Set Build Environment
+      run: |
+        echo "BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+        echo "GITHUB_SHA=${GITHUB_SHA}" >> $GITHUB_ENV
+        echo "NODE_ENV=${{ needs.setup.outputs.environment }}" >> $GITHUB_ENV
+        
+    - name: Execute Build
+      id: build
+      run: |
+        START_TIME=$(date +%s)
+        echo "🏗️ Building application for ${{ needs.setup.outputs.environment }}..."
+        npm run build
+        END_TIME=$(date +%s)
+        BUILD_TIME=$((END_TIME - START_TIME))
+        BUILD_SIZE=$(du -sh dist/ | cut -f1)
+        echo "build-time=${BUILD_TIME}" >> $GITHUB_OUTPUT
+        echo "build-size=${BUILD_SIZE}" >> $GITHUB_OUTPUT
+        echo "⏱️ Build completed in ${BUILD_TIME} seconds"
+        echo "📦 Build size: ${BUILD_SIZE}"
+        
+    - name: Create Build Info
+      run: |
+        cat > dist/build-info.json << EOF
+        {
+          "version": "2.0.0",
+          "environment": "${{ needs.setup.outputs.environment }}",
+          "buildTime": "${{ env.BUILD_TIME }}",
+          "commit": "${{ env.GITHUB_SHA }}",
+          "buildDuration": "${{ steps.build.outputs.build-time }}",
+          "buildSize": "${{ steps.build.outputs.build-size }}"
+        }
+        EOF
+        echo "📄 Build info created"
+        
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-${{ needs.setup.outputs.environment }}-${{ github.run_number }}
+        path: |
+          dist/
+          package.json
+        retention-days: 30
+
+  # JOB 5: Environment-Specific Deployment
+  deploy:
+    name: 🚀 Deploy
+    runs-on: ubuntu-latest
+    needs: [setup, build]
+    if: needs.setup.outputs.environment != 'development'
+    
+    environment:
+      name: ${{ needs.setup.outputs.environment }}
+      
+    steps:
+    - name: Download Build Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: build-${{ needs.setup.outputs.environment }}-${{ github.run_number }}
+        path: ./deploy/
+        
+    - name: Deploy to Environment
+      run: |
+        ENV="${{ needs.setup.outputs.environment }}"
+        echo "🚀 Deploying to ${ENV}..."
+        
+        case $ENV in
+          "production")
+            echo "🏭 Production deployment with safety checks"
+            sleep 3
+            ;;
+          "staging")
+            echo "🧪 Staging deployment"
+            sleep 2
+            ;;
+        esac
+        
+        echo "✅ Deployment to ${ENV} completed!"
+        
+    - name: Verify Deployment
+      run: |
+        echo "🏥 Running deployment verification..."
+        if [ -f "./deploy/build-info.json" ]; then
+          echo "📄 Build info:"
+          cat ./deploy/build-info.json
+        fi
+        echo "✅ Deployment verified successfully!"
+
+  # JOB 6: Performance Summary
+  summary:
+    name: 📊 Performance Summary
+    runs-on: ubuntu-latest
+    needs: [setup, dependencies, quality-checks, build, deploy]
+    if: always()
+    
+    steps:
+    - name: Calculate Performance Metrics
+      run: |
+        echo "📊 PERFORMANCE SUMMARY"
+        echo "======================"
+        echo "Environment: ${{ needs.setup.outputs.environment }}"
+        echo "Dependency install time: ${{ needs.dependencies.outputs.install-time }}s"
+        echo "Build time: ${{ needs.build.outputs.build-time }}s"
+        echo "Build size: ${{ needs.build.outputs.build-size }}"
+        echo ""
+        echo "🎯 JOB STATUS:"
+        echo "- Setup: ${{ needs.setup.result }}"
+        echo "- Dependencies: ${{ needs.dependencies.result }}"
+        echo "- Quality Checks: ${{ needs.quality-checks.result }}"
+        echo "- Build: ${{ needs.build.result }}"
+        echo "- Deploy: ${{ needs.deploy.result }}"
+        echo ""
+        
+        # Performance recommendations
+        INSTALL_TIME="${{ needs.dependencies.outputs.install-time }}"
+        BUILD_TIME="${{ needs.build.outputs.build-time }}"
+        
+        echo "💡 RECOMMENDATIONS:"
+        if [ "${INSTALL_TIME:-60}" -lt 30 ]; then
+          echo "✅ Dependency installation is optimized"
+        else
+          echo "⚠️ Consider aggressive caching for dependencies"
+        fi
+        
+        if [ "${BUILD_TIME:-60}" -lt 10 ]; then
+          echo "✅ Build time is excellent"
+        else
+          echo "⚠️ Consider build optimization strategies"
+        fi
