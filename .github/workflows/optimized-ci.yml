@@ -165,13 +165,21 @@ jobs:
         cache: 'npm'
         
     - name: Restore Dependencies
+      id: cache-restore
       uses: actions/cache/restore@v3
       with:
         path: |
           node_modules
           ~/.npm
         key: ${{ needs.setup.outputs.cache-key }}
-        fail-on-cache-miss: true
+        restore-keys: |
+          ${{ env.CACHE_VERSION }}-${{ runner.os }}-node-${{ env.NODE_VERSION }}-
+        
+    - name: Install Dependencies (if cache miss)
+      if: steps.cache-restore.outputs.cache-hit != 'true'
+      run: |
+        echo "⚠️ Cache miss detected, installing dependencies..."
+        npm ci
         
     - name: Run Tests
       if: matrix.check == 'test'
@@ -225,7 +233,16 @@ jobs:
           node_modules
           ~/.npm
         key: ${{ needs.setup.outputs.cache-key }}
-        fail-on-cache-miss: true
+        fail-on-cache-miss: false
+        
+    - name: Install Dependencies (if needed)
+      run: |
+        if [ ! -d "node_modules" ]; then
+          echo "⚠️ Node modules not found, installing..."
+          npm ci
+        else
+          echo "✅ Dependencies available"
+        fi
         
     - name: Set Build Environment
       run: |
