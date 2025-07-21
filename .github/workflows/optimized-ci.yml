@@ -28,15 +28,13 @@ on:
 # Global environment variables
 env:
   NODE_VERSION: '18'
-  CACHE_VERSION: 'v1'
 
 jobs:
-  # JOB 1: Setup and Cache Management
+  # JOB 1: Setup and Environment Detection
   setup:
-    name: 🔧 Setup & Cache
+    name: 🔧 Setup
     runs-on: ubuntu-latest
     outputs:
-      cache-key: ${{ steps.cache-keys.outputs.cache-key }}
       environment: ${{ steps.env.outputs.environment }}
     
     steps:
@@ -57,98 +55,12 @@ jobs:
         fi
         echo "environment=${ENV}" >> $GITHUB_OUTPUT
         echo "🌍 Environment: ${ENV}"
-        
-    - name: Generate Cache Keys
-      id: cache-keys
-      run: |
-        # Create cache key based on package-lock.json
-        CACHE_KEY="${{ env.CACHE_VERSION }}-${{ runner.os }}-node-${{ env.NODE_VERSION }}-$(sha256sum package-lock.json | cut -d' ' -f1)"
-        echo "cache-key=${CACHE_KEY}" >> $GITHUB_OUTPUT
-        echo "🔑 Cache key: ${CACHE_KEY}"
-        
-    - name: Setup Node.js with Caching
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ env.NODE_VERSION }}
-        cache: 'npm'
-        
-    - name: Check Cache Status
-      id: cache-check
-      if: github.event.inputs.use_cache != 'false'
-      uses: actions/cache@v3
-      with:
-        path: |
-          node_modules
-          ~/.npm
-        key: ${{ steps.cache-keys.outputs.cache-key }}
-        restore-keys: |
-          ${{ env.CACHE_VERSION }}-${{ runner.os }}-node-${{ env.NODE_VERSION }}-
-          
-    - name: Display Cache Status
-      run: |
-        if [ "${{ steps.cache-check.outputs.cache-hit }}" == "true" ]; then
-          echo "✅ Cache hit! Dependencies restored from cache"
-        else
-          echo "❌ Cache miss. Dependencies will be installed fresh"
-        fi
 
-  # JOB 2: Install Dependencies with Optimization
-  dependencies:
-    name: 📦 Dependencies
-    runs-on: ubuntu-latest
-    needs: setup
-    outputs:
-      install-time: ${{ steps.timing.outputs.install-time }}
-    
-    steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ env.NODE_VERSION }}
-        cache: 'npm'
-        
-    - name: Restore Cache
-      if: github.event.inputs.use_cache != 'false'
-      uses: actions/cache/restore@v3
-      with:
-        path: |
-          node_modules
-          ~/.npm
-        key: ${{ needs.setup.outputs.cache-key }}
-        
-    - name: Install Dependencies
-      id: install
-      run: |
-        START_TIME=$(date +%s)
-        echo "📦 Installing dependencies..."
-        npm ci --prefer-offline --no-audit
-        END_TIME=$(date +%s)
-        DURATION=$((END_TIME - START_TIME))
-        echo "⏱️ Installation took: ${DURATION} seconds"
-        echo "install-time=${DURATION}" >> $GITHUB_OUTPUT
-        
-    - name: Save Cache
-      if: github.event.inputs.use_cache != 'false'
-      uses: actions/cache/save@v3
-      with:
-        path: |
-          node_modules
-          ~/.npm
-        key: ${{ needs.setup.outputs.cache-key }}
-        
-    - name: Record Timing
-      id: timing
-      run: |
-        echo "install-time=${{ steps.install.outputs.install-time }}" >> $GITHUB_OUTPUT
-
-  # JOB 3: Parallel Testing and Linting
+  # JOB 2: Parallel Testing and Linting
   quality-checks:
     name: 🔍 Quality Checks
     runs-on: ubuntu-latest
-    needs: [setup, dependencies]
+    needs: setup
     
     strategy:
       matrix:
@@ -164,22 +76,17 @@ jobs:
         node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
         
-    - name: Restore Dependencies
-      id: cache-restore
-      uses: actions/cache/restore@v3
-      with:
-        path: |
-          node_modules
-          ~/.npm
-        key: ${{ needs.setup.outputs.cache-key }}
-        restore-keys: |
-          ${{ env.CACHE_VERSION }}-${{ runner.os }}-node-${{ env.NODE_VERSION }}-
-        
-    - name: Install Dependencies (if cache miss)
-      if: steps.cache-restore.outputs.cache-hit != 'true'
+    - name: Install Dependencies
       run: |
-        echo "⚠️ Cache miss detected, installing dependencies..."
+        echo "📦 Installing dependencies for ${{ matrix.check }}..."
         npm ci
+        
+    - name: Verify Jest Installation
+      if: matrix.check == 'test' || matrix.check == 'coverage'
+      run: |
+        echo "🔍 Verifying Jest installation..."
+        npx jest --version
+        echo "✅ Jest is available"
         
     - name: Run Tests
       if: matrix.check == 'test'
@@ -207,11 +114,11 @@ jobs:
         path: coverage/
         retention-days: 7
 
-  # JOB 4: Optimized Build
+  # JOB 3: Optimized Build
   build:
     name: 🏗️ Build
     runs-on: ubuntu-latest
-    needs: [setup, dependencies, quality-checks]
+    needs: [setup, quality-checks]
     outputs:
       build-time: ${{ steps.build.outputs.build-time }}
       build-size: ${{ steps.build.outputs.build-size }}
@@ -226,23 +133,10 @@ jobs:
         node-version: ${{ env.NODE_VERSION }}
         cache: 'npm'
         
-    - name: Restore Dependencies
-      uses: actions/cache/restore@v3
-      with:
-        path: |
-          node_modules
-          ~/.npm
-        key: ${{ needs.setup.outputs.cache-key }}
-        fail-on-cache-miss: false
-        
-    - name: Install Dependencies (if needed)
+    - name: Install Dependencies
       run: |
-        if [ ! -d "node_modules" ]; then
-          echo "⚠️ Node modules not found, installing..."
-          npm ci
-        else
-          echo "✅ Dependencies available"
-        fi
+        echo "📦 Installing dependencies for build..."
+        npm ci
         
     - name: Set Build Environment
       run: |
@@ -277,6 +171,7 @@ jobs:
         }
         EOF
         echo "📄 Build info created"
+        cat dist/build-info.json
         
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
@@ -287,7 +182,7 @@ jobs:
           package.json
         retention-days: 30
 
-  # JOB 5: Environment-Specific Deployment
+  # JOB 4: Environment-Specific Deployment
   deploy:
     name: 🚀 Deploy
     runs-on: ubuntu-latest
@@ -331,11 +226,11 @@ jobs:
         fi
         echo "✅ Deployment verified successfully!"
 
-  # JOB 6: Performance Summary
+  # JOB 5: Performance Summary
   summary:
     name: 📊 Performance Summary
     runs-on: ubuntu-latest
-    needs: [setup, dependencies, quality-checks, build, deploy]
+    needs: [setup, quality-checks, build, deploy]
     if: always()
     
     steps:
@@ -344,31 +239,29 @@ jobs:
         echo "📊 PERFORMANCE SUMMARY"
         echo "======================"
         echo "Environment: ${{ needs.setup.outputs.environment }}"
-        echo "Dependency install time: ${{ needs.dependencies.outputs.install-time }}s"
         echo "Build time: ${{ needs.build.outputs.build-time }}s"
         echo "Build size: ${{ needs.build.outputs.build-size }}"
         echo ""
         echo "🎯 JOB STATUS:"
         echo "- Setup: ${{ needs.setup.result }}"
-        echo "- Dependencies: ${{ needs.dependencies.result }}"
         echo "- Quality Checks: ${{ needs.quality-checks.result }}"
         echo "- Build: ${{ needs.build.result }}"
         echo "- Deploy: ${{ needs.deploy.result }}"
         echo ""
         
         # Performance recommendations
-        INSTALL_TIME="${{ needs.dependencies.outputs.install-time }}"
         BUILD_TIME="${{ needs.build.outputs.build-time }}"
         
         echo "💡 RECOMMENDATIONS:"
-        if [ "${INSTALL_TIME:-60}" -lt 30 ]; then
-          echo "✅ Dependency installation is optimized"
-        else
-          echo "⚠️ Consider aggressive caching for dependencies"
-        fi
-        
         if [ "${BUILD_TIME:-60}" -lt 10 ]; then
           echo "✅ Build time is excellent"
         else
           echo "⚠️ Consider build optimization strategies"
+        fi
+        
+        # Overall status
+        if [ "${{ needs.quality-checks.result }}" == "success" ] && [ "${{ needs.build.result }}" == "success" ]; then
+          echo "🎉 Pipeline completed successfully!"
+        else
+          echo "⚠️ Some stages had issues - check individual job logs"
         fi
