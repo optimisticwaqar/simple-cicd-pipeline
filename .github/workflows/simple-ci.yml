@@ -1,0 +1,42 @@
+name: Simple CI
+
+# When to run this workflow
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test Application
+    runs-on: ubuntu-latest
+    
+    steps:
+    # Get the code
+    - name: Get Code
+      uses: actions/checkout@v4
+      
+    # Setup Node.js
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    # Install packages
+    - name: Install Dependencies
+      run: npm install
+      
+    # Run tests
+    - name: Run Tests
+      run: npm test
+      
+    # Build application
+    - name: Build App
+      run: npm run build
+      
+    # Show what was built
+    - name: Show Build Results
+      run: |
+        echo "Build completed!"
+        ls -la dist/
