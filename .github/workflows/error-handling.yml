@@ -1,0 +1,274 @@
+name: Error Handling Demo
+
+# Manual trigger for testing error scenarios
+on:
+  workflow_dispatch:
+    inputs:
+      error_type:
+        description: 'Type of error to simulate'
+        type: choice
+        options:
+        - none
+        - dependency_failure
+        - test_failure
+        - build_failure
+        default: 'none'
+      recovery_mode:
+        description: 'Error recovery mode'
+        type: choice
+        options:
+        - fail_fast
+        - continue_on_error
+        - retry_logic
+        default: 'continue_on_error'
+
+jobs:
+  # JOB 1: Error Configuration
+  error-setup:
+    name: 🎯 Error Setup
+    runs-on: ubuntu-latest
+    outputs:
+      error-type: ${{ github.event.inputs.error_type }}
+      recovery-mode: ${{ github.event.inputs.recovery_mode }}
+    
+    steps:
+    - name: Configure Error Scenario
+      run: |
+        echo "🎯 Error scenario: ${{ github.event.inputs.error_type }}"
+        echo "🔧 Recovery mode: ${{ github.event.inputs.recovery_mode }}"
+
+  # JOB 2: Dependencies with Error Handling
+  dependencies-test:
+    name: 📦 Dependencies (Error Test)
+    runs-on: ubuntu-latest
+    needs: error-setup
+    continue-on-error: ${{ needs.error-setup.outputs.recovery-mode == 'continue_on_error' }}
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Simulate Dependency Error
+      if: needs.error-setup.outputs.error-type == 'dependency_failure'
+      run: |
+        echo "💥 Simulating dependency failure..."
+        if [ "${{ needs.error-setup.outputs.recovery-mode }}" == "fail_fast" ]; then
+          exit 1
+        elif [ "${{ needs.error-setup.outputs.recovery-mode }}" == "retry_logic" ]; then
+          echo "🔄 Attempting retry..."
+          sleep 2
+          echo "✅ Retry successful"
+        else
+          echo "⚠️ Continuing with error (continue-on-error enabled)"
+          exit 1
+        fi
+        
+    - name: Install Dependencies
+      if: needs.error-setup.outputs.error-type != 'dependency_failure' || needs.error-setup.outputs.recovery-mode == 'retry_logic'
+      run: |
+        echo "📦 Installing dependencies..."
+        npm ci
+        
+    - name: Log Dependency Status
+      if: always()
+      run: |
+        echo "📊 Dependency Status: ${{ job.status }}"
+        if [ -d "node_modules" ]; then
+          echo "✅ Dependencies installed"
+        else
+          echo "❌ Dependencies not installed"
+        fi
+
+  # JOB 3: Testing with Error Scenarios
+  test-with-errors:
+    name: 🧪 Tests (Error Test)
+    runs-on: ubuntu-latest
+    needs: [error-setup, dependencies-test]
+    continue-on-error: ${{ needs.error-setup.outputs.recovery-mode == 'continue_on_error' }}
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install Dependencies
+      if: needs.dependencies-test.result == 'success'
+      run: npm ci
+      
+    - name: Handle Missing Dependencies
+      if: needs.dependencies-test.result != 'success'
+      run: |
+        echo "⚠️ Previous dependency job failed, installing fresh..."
+        npm install
+        
+    - name: Create Failing Test
+      if: needs.error-setup.outputs.error-type == 'test_failure'
+      run: |
+        echo "💥 Creating failing test..."
+        cat > tests/failing.test.js << 'EOF'
+        test('intentional failure', () => {
+          expect(true).toBe(false);
+        });
+        EOF
+        
+    - name: Run Tests
+      id: test-run
+      run: |
+        echo "🧪 Running tests..."
+        if [ "${{ needs.error-setup.outputs.error-type }}" == "test_failure" ]; then
+          if [ "${{ needs.error-setup.outputs.recovery-mode }}" == "retry_logic" ]; then
+            echo "🔄 Test failed, attempting recovery..."
+            rm -f tests/failing.test.js
+            npm test
+          else
+            npm test || echo "Tests failed as expected"
+          fi
+        else
+          npm test
+        fi
+        
+    - name: Upload Test Results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ github.run_number }}
+        path: |
+          coverage/
+          tests/failing.test.js
+        if-no-files-found: ignore
+
+  # JOB 4: Build with Error Recovery
+  build-with-errors:
+    name: 🏗️ Build (Error Test)
+    runs-on: ubuntu-latest
+    needs: [error-setup, dependencies-test, test-with-errors]
+    continue-on-error: ${{ needs.error-setup.outputs.recovery-mode == 'continue_on_error' }}
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install Dependencies
+      run: |
+        if [ "${{ needs.dependencies-test.result }}" == "success" ]; then
+          npm ci
+        else
+          echo "🔄 Installing dependencies fresh due to previous failure..."
+          npm install
+        fi
+        
+    - name: Simulate Build Error
+      if: needs.error-setup.outputs.error-type == 'build_failure'
+      run: |
+        echo "💥 Simulating build failure..."
+        if [ "${{ needs.error-setup.outputs.recovery-mode }}" == "retry_logic" ]; then
+          echo "🔄 Attempting build recovery..."
+          mkdir -p dist
+          echo "// Fallback build" > dist/app.js
+          echo "✅ Fallback build successful"
+        elif [ "${{ needs.error-setup.outputs.recovery-mode }}" == "fail_fast" ]; then
+          exit 1
+        else
+          echo "Build failed, continuing..."
+          exit 1
+        fi
+        
+    - name: Execute Build
+      if: needs.error-setup.outputs.error-type != 'build_failure' || needs.error-setup.outputs.recovery-mode == 'retry_logic'
+      run: |
+        echo "🏗️ Building application..."
+        npm run build
+        
+    - name: Upload Build Artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifacts-${{ github.run_number }}
+        path: dist/
+        if-no-files-found: ignore
+
+  # JOB 5: Error Analysis and Reporting
+  error-analysis:
+    name: 📊 Error Analysis
+    runs-on: ubuntu-latest
+    needs: [error-setup, dependencies-test, test-with-errors, build-with-errors]
+    if: always()
+    
+    steps:
+    - name: Analyze Results
+      run: |
+        echo "🔍 ERROR HANDLING ANALYSIS"
+        echo "========================="
+        echo "Error type: ${{ needs.error-setup.outputs.error-type }}"
+        echo "Recovery mode: ${{ needs.error-setup.outputs.recovery-mode }}"
+        echo ""
+        echo "📊 JOB RESULTS:"
+        echo "- Dependencies: ${{ needs.dependencies-test.result }}"
+        echo "- Tests: ${{ needs.test-with-errors.result }}"
+        echo "- Build: ${{ needs.build-with-errors.result }}"
+        echo ""
+        
+        # Count successful jobs
+        SUCCESS_COUNT=0
+        [ "${{ needs.dependencies-test.result }}" == "success" ] && SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        [ "${{ needs.test-with-errors.result }}" == "success" ] && SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        [ "${{ needs.build-with-errors.result }}" == "success" ] && SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+        
+        echo "✅ Successful jobs: ${SUCCESS_COUNT}/3"
+        echo "📈 Success rate: $((SUCCESS_COUNT * 100 / 3))%"
+        echo ""
+        
+        # Recommendations
+        echo "💡 ERROR HANDLING LESSONS:"
+        echo "- continue-on-error allows pipeline progression despite failures"
+        echo "- Retry logic can handle transient failures"
+        echo "- fail-fast stops pipeline immediately on critical failures"
+        echo "- Always upload artifacts for debugging even when jobs fail"
+        echo "- Use 'if: always()' for cleanup and reporting jobs"
+        
+    - name: Generate Error Report
+      run: |
+        cat > error-report.md << EOF
+        # Error Handling Test Report
+        
+        **Error Type:** ${{ needs.error-setup.outputs.error-type }}
+        **Recovery Mode:** ${{ needs.error-setup.outputs.recovery-mode }}
+        **Pipeline ID:** ${{ github.run_number }}
+        
+        ## Results
+        
+        | Job | Result | Status |
+        |-----|--------|---------|
+        | Dependencies | ${{ needs.dependencies-test.result }} | ${{ needs.dependencies-test.result == 'success' && '✅' || '❌' }} |
+        | Tests | ${{ needs.test-with-errors.result }} | ${{ needs.test-with-errors.result == 'success' && '✅' || '❌' }} |
+        | Build | ${{ needs.build-with-errors.result }} | ${{ needs.build-with-errors.result == 'success' && '✅' || '❌' }} |
+        
+        ## Key Learnings
+        
+        1. **continue-on-error**: Allows pipeline to continue despite job failures
+        2. **Retry logic**: Can recover from transient failures
+        3. **Artifact upload**: Preserves debugging information even on failure
+        4. **Conditional execution**: Jobs can adapt based on previous results
+        EOF
+        
+    - name: Upload Error Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: error-report-${{ github.run_number }}
+        path: error-report.md
